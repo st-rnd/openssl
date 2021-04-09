@@ -1,7 +1,7 @@
 /*
- * Copyright 1995-2018 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2021 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Licensed under the OpenSSL license (the "License").  You may not use
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://www.openssl.org/source/license.html
@@ -45,31 +45,45 @@ typedef enum OPTION_choice {
     OPT_NOPAD, OPT_SALT, OPT_NOSALT, OPT_DEBUG, OPT_UPPER_P, OPT_UPPER_A,
     OPT_A, OPT_Z, OPT_BUFSIZE, OPT_K, OPT_KFILE, OPT_UPPER_K, OPT_NONE,
     OPT_UPPER_S, OPT_IV, OPT_MD, OPT_ITER, OPT_PBKDF2, OPT_CIPHER,
-    OPT_R_ENUM
+    OPT_R_ENUM, OPT_PROV_ENUM
 } OPTION_CHOICE;
 
 const OPTIONS enc_options[] = {
+    OPT_SECTION("General"),
     {"help", OPT_HELP, '-', "Display this summary"},
-    {"ciphers", OPT_LIST, '-', "List ciphers"},
-    {"in", OPT_IN, '<', "Input file"},
-    {"out", OPT_OUT, '>', "Output file"},
-    {"pass", OPT_PASS, 's', "Passphrase source"},
+    {"list", OPT_LIST, '-', "List ciphers"},
+#ifndef OPENSSL_NO_DEPRECATED_3_0
+    {"ciphers", OPT_LIST, '-', "Alias for -list"},
+#endif
     {"e", OPT_E, '-', "Encrypt"},
     {"d", OPT_D, '-', "Decrypt"},
     {"p", OPT_P, '-', "Print the iv/key"},
     {"P", OPT_UPPER_P, '-', "Print the iv/key and exit"},
+#ifndef OPENSSL_NO_ENGINE
+    {"engine", OPT_ENGINE, 's', "Use engine, possibly a hardware device"},
+#endif
+
+    OPT_SECTION("Input"),
+    {"in", OPT_IN, '<', "Input file"},
+    {"k", OPT_K, 's', "Passphrase"},
+    {"kfile", OPT_KFILE, '<', "Read passphrase from file"},
+
+    OPT_SECTION("Output"),
+    {"out", OPT_OUT, '>', "Output file"},
+    {"pass", OPT_PASS, 's', "Passphrase source"},
     {"v", OPT_V, '-', "Verbose output"},
-    {"nopad", OPT_NOPAD, '-', "Disable standard block padding"},
-    {"salt", OPT_SALT, '-', "Use salt in the KDF (default)"},
-    {"nosalt", OPT_NOSALT, '-', "Do not use salt in the KDF"},
-    {"debug", OPT_DEBUG, '-', "Print debug info"},
     {"a", OPT_A, '-', "Base64 encode/decode, depending on encryption flag"},
     {"base64", OPT_A, '-', "Same as option -a"},
     {"A", OPT_UPPER_A, '-',
      "Used with -[base64|a] to specify base64 buffer as a single line"},
+
+    OPT_SECTION("Encryption"),
+    {"nopad", OPT_NOPAD, '-', "Disable standard block padding"},
+    {"salt", OPT_SALT, '-', "Use salt in the KDF (default)"},
+    {"nosalt", OPT_NOSALT, '-', "Do not use salt in the KDF"},
+    {"debug", OPT_DEBUG, '-', "Print debug info"},
+
     {"bufsize", OPT_BUFSIZE, 's', "Buffer size"},
-    {"k", OPT_K, 's', "Passphrase"},
-    {"kfile", OPT_KFILE, '<', "Read passphrase from file"},
     {"K", OPT_UPPER_K, 's', "Raw key, in hex"},
     {"S", OPT_UPPER_S, 's', "Salt, in hex"},
     {"iv", OPT_IV, 's', "IV in hex"},
@@ -77,14 +91,13 @@ const OPTIONS enc_options[] = {
     {"iter", OPT_ITER, 'p', "Specify the iteration count and force use of PBKDF2"},
     {"pbkdf2", OPT_PBKDF2, '-', "Use password-based key derivation function 2"},
     {"none", OPT_NONE, '-', "Don't encrypt"},
-    {"", OPT_CIPHER, '-', "Any supported cipher"},
-    OPT_R_OPTIONS,
 #ifdef ZLIB
-    {"z", OPT_Z, '-', "Use zlib as the 'encryption'"},
+    {"z", OPT_Z, '-', "Compress or decompress encrypted data using zlib"},
 #endif
-#ifndef OPENSSL_NO_ENGINE
-    {"engine", OPT_ENGINE, 's', "Use engine, possibly a hardware device"},
-#endif
+    {"", OPT_CIPHER, '-', "Any supported cipher"},
+
+    OPT_R_OPTIONS,
+    OPT_PROV_OPTIONS,
     {NULL}
 };
 
@@ -96,11 +109,13 @@ int enc_main(int argc, char **argv)
     BIO *in = NULL, *out = NULL, *b64 = NULL, *benc = NULL, *rbio =
         NULL, *wbio = NULL;
     EVP_CIPHER_CTX *ctx = NULL;
-    const EVP_CIPHER *cipher = NULL, *c;
+    const EVP_CIPHER *cipher = NULL;
     const EVP_MD *dgst = NULL;
+    const char *digestname = NULL;
     char *hkey = NULL, *hiv = NULL, *hsalt = NULL, *p;
     char *infile = NULL, *outfile = NULL, *prog;
     char *str = NULL, *passarg = NULL, *pass = NULL, *strbuf = NULL;
+    const char *ciphername = NULL;
     char mbuf[sizeof(magic) - 1];
     OPTION_CHOICE o;
     int bsize = BSIZE, verbose = 0, debug = 0, olb64 = 0, nosalt = 0;
@@ -118,21 +133,15 @@ int enc_main(int argc, char **argv)
     BIO *bzl = NULL;
 #endif
 
-    /* first check the program name */
-    prog = opt_progname(argv[0]);
-    if (strcmp(prog, "base64") == 0) {
+    /* first check the command name */
+    if (strcmp(argv[0], "base64") == 0)
         base64 = 1;
 #ifdef ZLIB
-    } else if (strcmp(prog, "zlib") == 0) {
+    else if (strcmp(argv[0], "zlib") == 0)
         do_zlib = 1;
 #endif
-    } else {
-        cipher = EVP_get_cipherbyname(prog);
-        if (cipher == NULL && strcmp(prog, "enc") != 0) {
-            BIO_printf(bio_err, "%s is not a known cipher\n", prog);
-            goto end;
-        }
-    }
+    else if (strcmp(argv[0], "enc") != 0)
+        ciphername = argv[0];
 
     prog = opt_init(argc, argv, enc_options);
     while ((o = opt_next()) != OPT_EOF) {
@@ -251,13 +260,10 @@ int enc_main(int argc, char **argv)
             hiv = opt_arg();
             break;
         case OPT_MD:
-            if (!opt_md(opt_arg(), &dgst))
-                goto opthelp;
+            digestname = opt_arg();
             break;
         case OPT_CIPHER:
-            if (!opt_cipher(opt_unknown(), &c))
-                goto opthelp;
-            cipher = c;
+            ciphername = opt_unknown();
             break;
         case OPT_ITER:
             if (!opt_int(opt_arg(), &iter))
@@ -276,23 +282,36 @@ int enc_main(int argc, char **argv)
             if (!opt_rand(o))
                 goto end;
             break;
+        case OPT_PROV_CASES:
+            if (!opt_provider(o))
+                goto end;
+            break;
         }
     }
-    if (opt_num_rest() != 0) {
-        BIO_printf(bio_err, "Extra arguments given.\n");
-        goto opthelp;
-    }
 
+    /* No extra arguments. */
+    argc = opt_num_rest();
+    if (argc != 0)
+        goto opthelp;
+    app_RAND_load();
+
+    /* Get the cipher name, either from progname (if set) or flag. */
+    if (ciphername != NULL) {
+        if (!opt_cipher(ciphername, &cipher))
+            goto opthelp;
+    }
     if (cipher && EVP_CIPHER_flags(cipher) & EVP_CIPH_FLAG_AEAD_CIPHER) {
         BIO_printf(bio_err, "%s: AEAD ciphers not supported\n", prog);
         goto end;
     }
-
     if (cipher && (EVP_CIPHER_mode(cipher) == EVP_CIPH_XTS_MODE)) {
         BIO_printf(bio_err, "%s XTS ciphers not supported\n", prog);
         goto end;
     }
-
+    if (digestname != NULL) {
+        if (!opt_md(digestname, &dgst))
+            goto opthelp;
+    }
     if (dgst == NULL)
         dgst = EVP_sha256();
 
@@ -341,7 +360,7 @@ int enc_main(int argc, char **argv)
                 char prompt[200];
 
                 BIO_snprintf(prompt, sizeof(prompt), "enter %s %s password:",
-                        OBJ_nid2ln(EVP_CIPHER_nid(cipher)),
+                        EVP_CIPHER_name(cipher),
                         (enc) ? "encryption" : "decryption");
                 strbuf[0] = '\0';
                 i = EVP_read_pw_string((char *)strbuf, SIZE, prompt, enc);
@@ -500,7 +519,7 @@ int enc_main(int argc, char **argv)
         if (hiv != NULL) {
             int siz = EVP_CIPHER_iv_length(cipher);
             if (siz == 0) {
-                BIO_printf(bio_err, "warning: iv not use by this cipher\n");
+                BIO_printf(bio_err, "warning: iv not used by this cipher\n");
             } else if (!set_hex(hiv, iv, siz)) {
                 BIO_printf(bio_err, "invalid hex iv value\n");
                 goto end;
@@ -521,7 +540,7 @@ int enc_main(int argc, char **argv)
                 goto end;
             }
             /* wiping secret data as we no longer need it */
-            OPENSSL_cleanse(hkey, strlen(hkey));
+            cleanse(hkey);
         }
 
         if ((benc = BIO_new(BIO_f_cipher())) == NULL)
@@ -534,7 +553,7 @@ int enc_main(int argc, char **argv)
 
         BIO_get_cipher_ctx(benc, &ctx);
 
-        if (!EVP_CipherInit_ex(ctx, cipher, NULL, NULL, NULL, enc)) {
+        if (!EVP_CipherInit_ex(ctx, cipher, e, NULL, NULL, enc)) {
             BIO_printf(bio_err, "Error setting cipher %s\n",
                        EVP_CIPHER_name(cipher));
             ERR_print_errors(bio_err);
@@ -586,7 +605,7 @@ int enc_main(int argc, char **argv)
     if (benc != NULL)
         wbio = BIO_push(benc, wbio);
 
-    for (;;) {
+    while (BIO_pending(rbio) || !BIO_eof(rbio)) {
         inl = BIO_read(rbio, (char *)buff, bsize);
         if (inl <= 0)
             break;

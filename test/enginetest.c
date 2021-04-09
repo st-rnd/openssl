@@ -1,11 +1,14 @@
 /*
- * Copyright 2000-2017 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2000-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Licensed under the OpenSSL license (the "License").  You may not use
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://www.openssl.org/source/license.html
  */
+
+/* We need to use some deprecated APIs */
+#define OPENSSL_SUPPRESS_DEPRECATED
 
 #include <stdio.h>
 #include <string.h>
@@ -44,8 +47,9 @@ static void display_engine_list(void)
 static int test_engines(void)
 {
     ENGINE *block[NUMTOADD];
+    char *eid[NUMTOADD];
+    char *ename[NUMTOADD];
     char buf[256];
-    const char *id, *name;
     ENGINE *ptr;
     int loop;
     int to_return = 0;
@@ -120,8 +124,12 @@ static int test_engines(void)
     display_engine_list();
 
     /*
-     * Depending on whether there's any hardware support compiled in, this
-     * remove may be destined to fail.
+     * At this point, we should have an empty list, unless some hardware
+     * support engine got added.  However, since we don't allow the config
+     * file to be loaded and don't otherwise load any built in engines,
+     * that is unlikely.  Still, we check, if for nothing else, then to
+     * notify that something is a little off (and might mean that |new_h1|
+     * wasn't unloaded when it should have)
      */
     if ((ptr = ENGINE_get_first()) != NULL) {
         if (!ENGINE_remove(ptr))
@@ -138,12 +146,12 @@ static int test_engines(void)
     TEST_info("About to beef up the engine-type list");
     for (loop = 0; loop < NUMTOADD; loop++) {
         sprintf(buf, "id%d", loop);
-        id = OPENSSL_strdup(buf);
+        eid[loop] = OPENSSL_strdup(buf);
         sprintf(buf, "Fake engine type %d", loop);
-        name = OPENSSL_strdup(buf);
+        ename[loop] = OPENSSL_strdup(buf);
         if (!TEST_ptr(block[loop] = ENGINE_new())
-                || !TEST_true(ENGINE_set_id(block[loop], id))
-                || !TEST_true(ENGINE_set_name(block[loop], name)))
+                || !TEST_true(ENGINE_set_id(block[loop], eid[loop]))
+                || !TEST_true(ENGINE_set_name(block[loop], ename[loop])))
             goto end;
     }
     for (loop = 0; loop < NUMTOADD; loop++) {
@@ -162,8 +170,8 @@ static int test_engines(void)
         ENGINE_free(ptr);
     }
     for (loop = 0; loop < NUMTOADD; loop++) {
-        OPENSSL_free((void *)ENGINE_get_id(block[loop]));
-        OPENSSL_free((void *)ENGINE_get_name(block[loop]));
+        OPENSSL_free(eid[loop]);
+        OPENSSL_free(ename[loop]);
     }
     to_return = 1;
 
@@ -278,7 +286,7 @@ static int test_redirect(void)
      * Try setting test key engine. Both should fail because the
      * engine has no public key methods.
      */
-    if (!TEST_ptr_null(EVP_PKEY_CTX_new(pkey, e))
+    if (!TEST_ptr_null(ctx = EVP_PKEY_CTX_new(pkey, e))
             || !TEST_int_le(EVP_PKEY_set1_engine(pkey, e), 0))
         goto err;
 
@@ -345,6 +353,15 @@ static int test_redirect(void)
     return to_return;
 }
 #endif
+
+int global_init(void)
+{
+    /*
+     * If the config file gets loaded, the dynamic engine will be loaded,
+     * and that interferes with our test above.
+     */
+    return OPENSSL_init_crypto(OPENSSL_INIT_NO_LOAD_CONFIG, NULL);
+}
 
 int setup_tests(void)
 {

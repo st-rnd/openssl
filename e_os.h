@@ -1,14 +1,14 @@
 /*
- * Copyright 1995-2018 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 1995-2021 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Licensed under the OpenSSL license (the "License").  You may not use
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://www.openssl.org/source/license.html
  */
 
-#ifndef HEADER_E_OS_H
-# define HEADER_E_OS_H
+#ifndef OSSL_E_OS_H
+# define OSSL_E_OS_H
 
 # include <limits.h>
 # include <openssl/opensslconf.h>
@@ -22,26 +22,6 @@
  * outside; this file e_os.h is not part of the exported interface.
  */
 
-# ifndef DEVRANDOM
-/*
- * set this to a comma-separated list of 'random' device files to try out. By
- * default, we will try to read at least one of these files
- */
-#  if defined(__s390__)
-#   define DEVRANDOM "/dev/prandom","/dev/urandom","/dev/hwrng","/dev/random"
-#  else
-#   define DEVRANDOM "/dev/urandom","/dev/random","/dev/srandom"
-#  endif
-# endif
-# if !defined(OPENSSL_NO_EGD) && !defined(DEVRANDOM_EGD)
-/*
- * set this to a comma-separated list of 'egd' sockets to try out. These
- * sockets will be tried in the order listed in case accessing the device
- * files listed in DEVRANDOM did not return enough randomness.
- */
-#  define DEVRANDOM_EGD "/var/run/egd-pool","/dev/egd-pool","/etc/egd-pool","/etc/entropy"
-# endif
-
 # if defined(OPENSSL_SYS_VXWORKS) || defined(OPENSSL_SYS_UEFI)
 #  define NO_CHMOD
 #  define NO_SYSLOG
@@ -49,6 +29,7 @@
 
 # define get_last_sys_error()    errno
 # define clear_sys_error()       errno=0
+# define set_sys_error(e)        errno=(e)
 
 /********************************************************************
  The Microsoft section
@@ -66,8 +47,10 @@
 # ifdef WIN32
 #  undef get_last_sys_error
 #  undef clear_sys_error
+#  undef set_sys_error
 #  define get_last_sys_error()    GetLastError()
 #  define clear_sys_error()       SetLastError(0)
+#  define set_sys_error(e)        SetLastError(e)
 #  if !defined(WINNT)
 #   define WIN_CONSOLE_BUG
 #  endif
@@ -82,7 +65,6 @@
 #   define _setmode setmode
 #   define _O_TEXT O_TEXT
 #   define _O_BINARY O_BINARY
-#   define HAS_LFN_SUPPORT(name)  (pathconf((name), _PC_NAME_MAX) > 12)
 #   undef DEVRANDOM_EGD  /*  Neither MS-DOS nor FreeDOS provide 'egd' sockets.  */
 #   undef DEVRANDOM
 #   define DEVRANDOM "/dev/urandom\x24"
@@ -208,7 +190,7 @@ extern FILE *_imp___iob;
 # else                          /* The non-microsoft world */
 
 #  if defined(OPENSSL_SYS_VXWORKS)
-#   include <sys/times.h>
+#   include <time.h>
 #  else
 #   include <sys/time.h>
 #  endif
@@ -245,7 +227,7 @@ extern FILE *_imp___iob;
 
      Finally, we add the VMS C facility code 0x35a000, because there are some
      programs, such as Perl, that will reinterpret the code back to something
-     POSIXly.  'man perlvms' explains it further.
+     POSIX.  'man perlvms' explains it further.
 
      NOTE: the perlvms manual wants to turn all codes 2 to 255 into success
      codes (status type = 1).  I couldn't disagree more.  Fortunately, the
@@ -258,11 +240,7 @@ extern FILE *_imp___iob;
 
 #  else
      /* !defined VMS */
-#   ifdef OPENSSL_UNISTD
-#    include OPENSSL_UNISTD
-#   else
-#    include <unistd.h>
-#   endif
+#   include <unistd.h>
 #   include <sys/types.h>
 #   ifdef OPENSSL_SYS_WIN32_CYGWIN
 #    include <io.h>
@@ -280,7 +258,7 @@ extern FILE *_imp___iob;
 # if defined(OPENSSL_SYS_WINDOWS)
 #  define strcasecmp _stricmp
 #  define strncasecmp _strnicmp
-#  if (_MSC_VER >= 1310)
+#  if (_MSC_VER >= 1310) && !defined(_WIN32_WCE)
 #   define open _open
 #   define fdopen _fdopen
 #   define close _close
@@ -317,8 +295,79 @@ struct servent *getservbyname(const char *name, const char *proto);
 # endif
 /* end vxworks */
 
-#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-# define CRYPTO_memcmp memcmp
-#endif
+/* ----------------------------- HP NonStop -------------------------------- */
+/* Required to support platform variant without getpid() and pid_t. */
+# if defined(__TANDEM) && defined(_GUARDIAN_TARGET)
+#  include <strings.h>
+#  include <netdb.h>
+#  define getservbyname(name,proto)          getservbyname((char*)name,proto)
+#  define gethostbyname(name)                gethostbyname((char*)name)
+#  define ioctlsocket(a,b,c)	ioctl(a,b,c)
+#  ifdef NO_GETPID
+inline int nssgetpid();
+#   ifndef NSSGETPID_MACRO
+#    define NSSGETPID_MACRO
+#    include <cextdecs.h(PROCESSHANDLE_GETMINE_)>
+#    include <cextdecs.h(PROCESSHANDLE_DECOMPOSE_)>
+       inline int nssgetpid()
+       {
+         short phandle[10]={0};
+         union pseudo_pid {
+          struct {
+           short cpu;
+           short pin;
+         } cpu_pin ;
+         int ppid;
+        } ppid = { 0 };
+        PROCESSHANDLE_GETMINE_(phandle);
+        PROCESSHANDLE_DECOMPOSE_(phandle, &ppid.cpu_pin.cpu, &ppid.cpu_pin.pin);
+        return ppid.ppid;
+       }
+#    define getpid(a) nssgetpid(a)
+#   endif /* NSSGETPID_MACRO */
+#  endif /* NO_GETPID */
+/*#  define setsockopt(a,b,c,d,f) setsockopt(a,b,c,(char*)d,f)*/
+/*#  define getsockopt(a,b,c,d,f) getsockopt(a,b,c,(char*)d,f)*/
+/*#  define connect(a,b,c) connect(a,(struct sockaddr *)b,c)*/
+/*#  define bind(a,b,c) bind(a,(struct sockaddr *)b,c)*/
+/*#  define sendto(a,b,c,d,e,f) sendto(a,(char*)b,c,d,(struct sockaddr *)e,f)*/
+#  if defined(OPENSSL_THREADS) && !defined(_PUT_MODEL_)
+  /*
+   * HPNS SPT threads
+   */
+#   define  SPT_THREAD_SIGNAL 1
+#   define  SPT_THREAD_AWARE 1
+#   include <spthread.h>
+#   undef close
+#   define close spt_close
+/*
+#   define get_last_socket_error()	errno
+#   define clear_socket_error()	errno=0
+#   define ioctlsocket(a,b,c)	ioctl(a,b,c)
+#   define closesocket(s)		close(s)
+#   define readsocket(s,b,n)	read((s),(char*)(b),(n))
+#   define writesocket(s,b,n)	write((s),(char*)(b),(n)
+*/
+#   define accept(a,b,c)        accept(a,(struct sockaddr *)b,c)
+#   define recvfrom(a,b,c,d,e,f) recvfrom(a,b,(socklen_t)c,d,e,f)
+#  endif
+# endif
+
+# ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+#  define CRYPTO_memcmp memcmp
+# endif
+
+# ifndef OPENSSL_NO_SECURE_MEMORY
+   /* unistd.h defines _POSIX_VERSION */
+#  if (defined(OPENSSL_SYS_UNIX) \
+        && ( (defined(_POSIX_VERSION) && _POSIX_VERSION >= 200112L)      \
+             || defined(__sun) || defined(__hpux) || defined(__sgi)      \
+             || defined(__osf__) )) \
+      || defined(_WIN32)
+      /* secure memory is implemented */
+#   else
+#     define OPENSSL_NO_SECURE_MEMORY
+#   endif
+# endif
 
 #endif

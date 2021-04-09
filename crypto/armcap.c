@@ -1,7 +1,7 @@
 /*
- * Copyright 2011-2018 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2011-2021 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Licensed under the OpenSSL license (the "License").  You may not use
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://www.openssl.org/source/license.html
@@ -18,6 +18,7 @@
 #include "arm_arch.h"
 
 unsigned int OPENSSL_armcap_P = 0;
+unsigned int OPENSSL_arm_midr = 0;
 
 #if __ARM_MAX_ARCH__<7
 void OPENSSL_cpuid_setup(void)
@@ -48,6 +49,7 @@ void _armv8_sha256_probe(void);
 void _armv8_pmull_probe(void);
 # ifdef __aarch64__
 void _armv8_sha512_probe(void);
+unsigned int _armv8_cpuid_probe(void);
 # endif
 uint32_t _armv7_tick(void);
 
@@ -62,14 +64,29 @@ uint32_t OPENSSL_rdtsc(void)
 # if defined(__GNUC__) && __GNUC__>=2
 void OPENSSL_cpuid_setup(void) __attribute__ ((constructor));
 # endif
-/*
- * Use a weak reference to getauxval() so we can use it if it is available but
- * don't break the build if it is not.
- */
-# if defined(__GNUC__) && __GNUC__>=2 && defined(__ELF__)
-extern unsigned long getauxval(unsigned long type) __attribute__ ((weak));
-# else
-static unsigned long (*getauxval) (unsigned long) = NULL;
+
+# if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+#  if __GLIBC_PREREQ(2, 16)
+#   include <sys/auxv.h>
+#   define OSSL_IMPLEMENT_GETAUXVAL
+#  endif
+# endif
+# if defined(__FreeBSD__)
+#  include <sys/param.h>
+#  if __FreeBSD_version >= 1200000
+#   include <sys/auxv.h>
+#   define OSSL_IMPLEMENT_GETAUXVAL
+
+static unsigned long getauxval(unsigned long key)
+{
+  unsigned long val = 0ul;
+
+  if (elf_aux_info((int)key, &val, sizeof(val)) != 0)
+    return 0ul;
+
+  return val;
+}
+#  endif
 # endif
 
 /*
@@ -97,6 +114,7 @@ static unsigned long (*getauxval) (unsigned long) = NULL;
 #  define HWCAP_CE_PMULL         (1 << 4)
 #  define HWCAP_CE_SHA1          (1 << 5)
 #  define HWCAP_CE_SHA256        (1 << 6)
+#  define HWCAP_CPUID            (1 << 11)
 #  define HWCAP_CE_SHA512        (1 << 21)
 # endif
 
@@ -134,14 +152,42 @@ void OPENSSL_cpuid_setup(void)
      */
 # endif
 
+    OPENSSL_armcap_P = 0;
+
+# ifdef OSSL_IMPLEMENT_GETAUXVAL
+    if (getauxval(HWCAP) & HWCAP_NEON) {
+        unsigned long hwcap = getauxval(HWCAP_CE);
+
+        OPENSSL_armcap_P |= ARMV7_NEON;
+
+        if (hwcap & HWCAP_CE_AES)
+            OPENSSL_armcap_P |= ARMV8_AES;
+
+        if (hwcap & HWCAP_CE_PMULL)
+            OPENSSL_armcap_P |= ARMV8_PMULL;
+
+        if (hwcap & HWCAP_CE_SHA1)
+            OPENSSL_armcap_P |= ARMV8_SHA1;
+
+        if (hwcap & HWCAP_CE_SHA256)
+            OPENSSL_armcap_P |= ARMV8_SHA256;
+
+#  ifdef __aarch64__
+        if (hwcap & HWCAP_CE_SHA512)
+            OPENSSL_armcap_P |= ARMV8_SHA512;
+
+        if (hwcap & HWCAP_CPUID)
+            OPENSSL_armcap_P |= ARMV8_CPUID;
+#  endif
+    }
+# endif
+
     sigfillset(&all_masked);
     sigdelset(&all_masked, SIGILL);
     sigdelset(&all_masked, SIGTRAP);
     sigdelset(&all_masked, SIGFPE);
     sigdelset(&all_masked, SIGBUS);
     sigdelset(&all_masked, SIGSEGV);
-
-    OPENSSL_armcap_P = 0;
 
     memset(&ill_act, 0, sizeof(ill_act));
     ill_act.sa_handler = ill_handler;
@@ -150,30 +196,9 @@ void OPENSSL_cpuid_setup(void)
     sigprocmask(SIG_SETMASK, &ill_act.sa_mask, &oset);
     sigaction(SIGILL, &ill_act, &ill_oact);
 
-    if (getauxval != NULL) {
-        if (getauxval(HWCAP) & HWCAP_NEON) {
-            unsigned long hwcap = getauxval(HWCAP_CE);
-
-            OPENSSL_armcap_P |= ARMV7_NEON;
-
-            if (hwcap & HWCAP_CE_AES)
-                OPENSSL_armcap_P |= ARMV8_AES;
-
-            if (hwcap & HWCAP_CE_PMULL)
-                OPENSSL_armcap_P |= ARMV8_PMULL;
-
-            if (hwcap & HWCAP_CE_SHA1)
-                OPENSSL_armcap_P |= ARMV8_SHA1;
-
-            if (hwcap & HWCAP_CE_SHA256)
-                OPENSSL_armcap_P |= ARMV8_SHA256;
-
-# ifdef __aarch64__
-            if (hwcap & HWCAP_CE_SHA512)
-                OPENSSL_armcap_P |= ARMV8_SHA512;
-# endif
-        }
-    } else if (sigsetjmp(ill_jmp, 1) == 0) {
+    /* If we used getauxval, we already have all the values */
+# ifndef OSSL_IMPLEMENT_GETAUXVAL
+    if (sigsetjmp(ill_jmp, 1) == 0) {
         _armv7_neon_probe();
         OPENSSL_armcap_P |= ARMV7_NEON;
         if (sigsetjmp(ill_jmp, 1) == 0) {
@@ -191,13 +216,16 @@ void OPENSSL_cpuid_setup(void)
             _armv8_sha256_probe();
             OPENSSL_armcap_P |= ARMV8_SHA256;
         }
-# if defined(__aarch64__) && !defined(__APPLE__)
+#  if defined(__aarch64__) && !defined(__APPLE__)
         if (sigsetjmp(ill_jmp, 1) == 0) {
             _armv8_sha512_probe();
             OPENSSL_armcap_P |= ARMV8_SHA512;
         }
-# endif
+#  endif
     }
+# endif
+
+    /* Things that getauxval didn't tell us */
     if (sigsetjmp(ill_jmp, 1) == 0) {
         _armv7_tick();
         OPENSSL_armcap_P |= ARMV7_TICK;
@@ -205,5 +233,10 @@ void OPENSSL_cpuid_setup(void)
 
     sigaction(SIGILL, &ill_oact, NULL);
     sigprocmask(SIG_SETMASK, &oset, NULL);
+
+# ifdef __aarch64__
+    if (OPENSSL_armcap_P & ARMV8_CPUID)
+        OPENSSL_arm_midr = _armv8_cpuid_probe();
+# endif
 }
 #endif

@@ -1,7 +1,7 @@
 /*
- * Copyright 2017 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2017-2021 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Licensed under the OpenSSL license (the "License").  You may not use
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://www.openssl.org/source/license.html
@@ -27,12 +27,7 @@
 #include <string.h>
 #include <openssl/crypto.h>
 
-#include "internal/siphash.h"
-#include "siphash_local.h"
-
-/* default: SipHash-2-4 */
-#define SIPHASH_C_ROUNDS 2
-#define SIPHASH_D_ROUNDS 4
+#include "crypto/siphash.h"
 
 #define ROTL(x, b) (uint64_t)(((x) << (b)) | ((x) >> (64 - (b))))
 
@@ -80,17 +75,44 @@ size_t SipHash_hash_size(SIPHASH *ctx)
     return ctx->hash_size;
 }
 
+static size_t siphash_adjust_hash_size(size_t hash_size)
+{
+    if (hash_size == 0)
+        hash_size = SIPHASH_MAX_DIGEST_SIZE;
+    return hash_size;
+}
+
+int SipHash_set_hash_size(SIPHASH *ctx, size_t hash_size)
+{
+    hash_size = siphash_adjust_hash_size(hash_size);
+    if (hash_size != SIPHASH_MIN_DIGEST_SIZE
+        && hash_size != SIPHASH_MAX_DIGEST_SIZE)
+        return 0;
+
+    /*
+     * It's possible that the key was set first.  If the hash size changes,
+     * we need to adjust v1 (see SipHash_Init().
+     */
+
+    /* Start by adjusting the stored size, to make things easier */
+    ctx->hash_size = siphash_adjust_hash_size(ctx->hash_size);
+
+    /* Now, adjust ctx->v1 if the old and the new size differ */
+    if ((size_t)ctx->hash_size != hash_size) {
+        ctx->v1 ^= 0xee;
+        ctx->hash_size = hash_size;
+    }
+    return 1;
+}
+
 /* hash_size = crounds = drounds = 0 means SipHash24 with 16-byte output */
-int SipHash_Init(SIPHASH *ctx, const unsigned char *k, int hash_size, int crounds, int drounds)
+int SipHash_Init(SIPHASH *ctx, const unsigned char *k, int crounds, int drounds)
 {
     uint64_t k0 = U8TO64_LE(k);
     uint64_t k1 = U8TO64_LE(k + 8);
 
-    if (hash_size == 0)
-        hash_size = SIPHASH_MAX_DIGEST_SIZE;
-    else if (hash_size != SIPHASH_MIN_DIGEST_SIZE &&
-             hash_size != SIPHASH_MAX_DIGEST_SIZE)
-        return 0;
+    /* If the hash size wasn't set, i.e. is zero */
+    ctx->hash_size = siphash_adjust_hash_size(ctx->hash_size);
 
     if (drounds == 0)
         drounds = SIPHASH_D_ROUNDS;
@@ -99,7 +121,6 @@ int SipHash_Init(SIPHASH *ctx, const unsigned char *k, int hash_size, int cround
 
     ctx->crounds = crounds;
     ctx->drounds = drounds;
-    ctx->hash_size = hash_size;
 
     ctx->len = 0;
     ctx->total_inlen = 0;
@@ -120,7 +141,7 @@ void SipHash_Update(SIPHASH *ctx, const unsigned char *in, size_t inlen)
     uint64_t m;
     const uint8_t *end;
     int left;
-    int i;
+    unsigned int i;
     uint64_t v0 = ctx->v0;
     uint64_t v1 = ctx->v1;
     uint64_t v2 = ctx->v2;
@@ -176,7 +197,7 @@ void SipHash_Update(SIPHASH *ctx, const unsigned char *in, size_t inlen)
 int SipHash_Final(SIPHASH *ctx, unsigned char *out, size_t outlen)
 {
     /* finalize hash */
-    int i;
+    unsigned int i;
     uint64_t b = ctx->total_inlen << 56;
     uint64_t v0 = ctx->v0;
     uint64_t v1 = ctx->v1;

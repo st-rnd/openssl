@@ -1,7 +1,7 @@
 #! /usr/bin/env perl
-# Copyright 2015-2018 The OpenSSL Project Authors. All Rights Reserved.
+# Copyright 2015-2021 The OpenSSL Project Authors. All Rights Reserved.
 #
-# Licensed under the OpenSSL license (the "License").  You may not use
+# Licensed under the Apache License 2.0 (the "License").  You may not use
 # this file except in compliance with the License.  You can obtain a copy
 # in the file LICENSE in the source distribution or at
 # https://www.openssl.org/source/license.html
@@ -88,9 +88,11 @@ sub inject_duplicate_extension
     foreach my $message (@{$proxy->message_list}) {
         if ($message->mt == $message_type) {
           my %extensions = %{$message->extension_data};
-            # Add a duplicate (unknown) extension.
-            $message->set_extension(TLSProxy::Message::EXT_DUPLICATE_EXTENSION, "");
-            $message->set_extension(TLSProxy::Message::EXT_DUPLICATE_EXTENSION, "");
+            # Add a duplicate extension. We use cryptopro_bug since we never
+            # normally write that one, and it is allowed as unsolicited in the
+            # ServerHello
+            $message->set_extension(TLSProxy::Message::EXT_CRYPTOPRO_BUG_EXTENSION, "");
+            $message->dupext(TLSProxy::Message::EXT_CRYPTOPRO_BUG_EXTENSION);
             $message->repack();
         }
     }
@@ -173,23 +175,40 @@ sub inject_unsolicited_extension
     $sent_unsolisited_extension = 1;
 }
 
+sub inject_cryptopro_extension
+{
+    my $proxy = shift;
+
+    # We're only interested in the initial ClientHello
+    if ($proxy->flight != 0) {
+        return;
+    }
+
+    my $message = ${$proxy->message_list}[0];
+    $message->set_extension(TLSProxy::Message::EXT_CRYPTOPRO_BUG_EXTENSION, "");
+    $message->repack();
+}
+
 # Test 1-2: Sending a duplicate extension should fail.
 $proxy->start() or plan skip_all => "Unable to start up Proxy for tests";
-plan tests => 7;
+plan tests => 8;
 ok($fatal_alert, "Duplicate ClientHello extension");
 
 $fatal_alert = 0;
 $proxy->clear();
 $proxy->filter(\&inject_duplicate_extension_serverhello);
+$proxy->clientflags("-no_tls1_3");
 $proxy->start();
 ok($fatal_alert, "Duplicate ServerHello extension");
 
 SKIP: {
-    skip "TLS <= 1.2 disabled", 3 if $no_below_tls13;
+    skip "TLS <= 1.2 disabled", 2 if $no_below_tls13;
 
     #Test 3: Sending a zero length extension block should pass
     $proxy->clear();
     $proxy->filter(\&extension_filter);
+    $proxy->ciphers("AES128-SHA:\@SECLEVEL=0");
+    $proxy->clientflags("-no_tls1_3");
     $proxy->start();
     ok(TLSProxy::Message->success, "Zero extension length test");
 
@@ -201,7 +220,10 @@ SKIP: {
     $proxy->clientflags("-no_tls1_3 -noservername");
     $proxy->start();
     ok($fatal_alert, "Unsolicited server name extension");
-
+}
+SKIP: {
+    skip "TLS <= 1.2 disabled or EC disabled", 1
+        if $no_below_tls13 || disabled("ec");
     #Test 5: Inject a noncompliant supported_groups extension (<= TLSv1.2)
     $proxy->clear();
     $proxy->filter(\&inject_unsolicited_extension);
@@ -224,7 +246,8 @@ SKIP: {
 }
 
 SKIP: {
-    skip "TLS 1.3 disabled", 1 if disabled("tls1_3");
+    skip "TLS 1.3 disabled", 1
+        if disabled("tls1_3") || (disabled("ec") && disabled("dh"));
     #Test 7: Inject an unsolicited extension (TLSv1.3)
     $fatal_alert = 0;
     $proxy->clear();
@@ -234,3 +257,12 @@ SKIP: {
     $proxy->start();
     ok($fatal_alert, "Unsolicited server name extension (TLSv1.3)");
 }
+
+#Test 8: Send the cryptopro extension in a ClientHello. Normally this is an
+#        unsolicited extension only ever seen in the ServerHello. We should
+#        ignore it in a ClientHello
+$proxy->clear();
+$proxy->filter(\&inject_cryptopro_extension);
+$proxy->clientflags("-no_tls1_3");
+$proxy->start();
+ok(TLSProxy::Message->success(), "Cryptopro extension in ClientHello");

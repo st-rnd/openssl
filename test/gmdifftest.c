@@ -1,7 +1,7 @@
 /*
- * Copyright 2015-2017 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2015-2021 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Licensed under the OpenSSL license (the "License").  You may not use
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://www.openssl.org/source/license.html
@@ -32,8 +32,8 @@ static int check_time(long offset)
     OPENSSL_gmtime(&t2, &tm2);
     OPENSSL_gmtime(&t1, &tm1);
     o1 = tm1;
-    OPENSSL_gmtime_adj(&tm1, 0, offset);
-    if (!TEST_int_eq(tm1.tm_year, tm2.tm_year)
+    if (!TEST_true(OPENSSL_gmtime_adj(&tm1, 0, offset))
+        || !TEST_int_eq(tm1.tm_year, tm2.tm_year)
         || !TEST_int_eq(tm1.tm_mon, tm2.tm_mon)
         || !TEST_int_eq(tm1.tm_mday, tm2.tm_mday)
         || !TEST_int_eq(tm1.tm_hour, tm2.tm_hour)

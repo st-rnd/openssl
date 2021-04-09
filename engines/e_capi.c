@@ -1,11 +1,14 @@
 /*
- * Copyright 2008-2018 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2008-2020 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Licensed under the OpenSSL license (the "License").  You may not use
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://www.openssl.org/source/license.html
  */
+
+/* We need to use some deprecated APIs */
+#define OPENSSL_SUPPRESS_DEPRECATED
 
 #ifdef _WIN32
 # ifndef _WIN32_WINNT
@@ -597,9 +600,19 @@ void engine_load_capi_int(void)
     ENGINE *toadd = engine_capi();
     if (!toadd)
         return;
+    ERR_set_mark();
     ENGINE_add(toadd);
+    /*
+     * If the "add" worked, it gets a structural reference. So either way, we
+     * release our just-created reference.
+     */
     ENGINE_free(toadd);
-    ERR_clear_error();
+    /*
+     * If the "add" didn't work, it was probably a conflict because it was
+     * already added (eg. someone calling ENGINE_load_blah then calling
+     * ENGINE_load_builtin_engines() perhaps).
+     */
+    ERR_pop_to_mark();
 }
 # endif
 
@@ -917,6 +930,7 @@ int capi_rsa_priv_dec(int flen, const unsigned char *from,
     unsigned char *tmpbuf;
     CAPI_KEY *capi_key;
     CAPI_CTX *ctx;
+    DWORD flags = 0;
     DWORD dlen;
 
     if (flen <= 0)
@@ -932,12 +946,23 @@ int capi_rsa_priv_dec(int flen, const unsigned char *from,
         return -1;
     }
 
-    if (padding != RSA_PKCS1_PADDING) {
-        char errstr[10];
-        BIO_snprintf(errstr, 10, "%d", padding);
-        CAPIerr(CAPI_F_CAPI_RSA_PRIV_DEC, CAPI_R_UNSUPPORTED_PADDING);
-        ERR_add_error_data(2, "padding=", errstr);
-        return -1;
+    switch (padding) {
+    case RSA_PKCS1_PADDING:
+        /* Nothing to do */
+        break;
+#ifdef CRYPT_DECRYPT_RSA_NO_PADDING_CHECK
+    case RSA_NO_PADDING:
+        flags = CRYPT_DECRYPT_RSA_NO_PADDING_CHECK;
+        break;
+#endif
+    default:
+        {
+            char errstr[10];
+            BIO_snprintf(errstr, 10, "%d", padding);
+            CAPIerr(CAPI_F_CAPI_RSA_PRIV_DEC, CAPI_R_UNSUPPORTED_PADDING);
+            ERR_add_error_data(2, "padding=", errstr);
+            return -1;
+        }
     }
 
     /* Create temp reverse order version of input */
@@ -950,14 +975,16 @@ int capi_rsa_priv_dec(int flen, const unsigned char *from,
 
     /* Finally decrypt it */
     dlen = flen;
-    if (!CryptDecrypt(capi_key->key, 0, TRUE, 0, tmpbuf, &dlen)) {
+    if (!CryptDecrypt(capi_key->key, 0, TRUE, flags, tmpbuf, &dlen)) {
         CAPIerr(CAPI_F_CAPI_RSA_PRIV_DEC, CAPI_R_DECRYPT_ERROR);
         capi_addlasterror();
+        OPENSSL_cleanse(tmpbuf, dlen);
         OPENSSL_free(tmpbuf);
         return -1;
     } else {
         memcpy(to, tmpbuf, (flen = (int)dlen));
     }
+    OPENSSL_cleanse(tmpbuf, flen);
     OPENSSL_free(tmpbuf);
 
     return flen;
@@ -1287,13 +1314,14 @@ static void capi_dump_prov_info(CAPI_CTX *ctx, BIO *out,
                                 CRYPT_KEY_PROV_INFO *pinfo)
 {
     char *provname = NULL, *contname = NULL;
-    if (!pinfo) {
+
+    if (pinfo == NULL) {
         BIO_printf(out, "  No Private Key\n");
         return;
     }
     provname = wide_to_asc(pinfo->pwszProvName);
     contname = wide_to_asc(pinfo->pwszContainerName);
-    if (!provname || !contname)
+    if (provname == NULL || contname == NULL)
         goto err;
 
     BIO_printf(out, "  Private Key Info:\n");
@@ -1763,7 +1791,7 @@ static int capi_load_ssl_client_cert(ENGINE *e, SSL *ssl,
 
     sk_X509_free(certs);
 
-    if (!*pcert)
+    if (*pcert == NULL)
         return 0;
 
     /* Setup key for selected certificate */

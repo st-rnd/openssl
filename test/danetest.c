@@ -1,7 +1,7 @@
 /*
- * Copyright 2015-2017 The OpenSSL Project Authors. All Rights Reserved.
+ * Copyright 2015-2021 The OpenSSL Project Authors. All Rights Reserved.
  *
- * Licensed under the OpenSSL license (the "License").  You may not use
+ * Licensed under the Apache License 2.0 (the "License").  You may not use
  * this file except in compliance with the License.  You can obtain a copy
  * in the file LICENSE in the source distribution or at
  * https://www.openssl.org/source/license.html
@@ -57,15 +57,13 @@ static int verify_chain(SSL *ssl, STACK_OF(X509) *chain)
     X509_STORE_CTX *store_ctx = NULL;
     SSL_CTX *ssl_ctx = NULL;
     X509_STORE *store = NULL;
-    X509 *cert = NULL;
     int ret = 0;
     int store_ctx_idx = SSL_get_ex_data_X509_STORE_CTX_idx();
 
     if (!TEST_ptr(store_ctx = X509_STORE_CTX_new())
             || !TEST_ptr(ssl_ctx = SSL_get_SSL_CTX(ssl))
             || !TEST_ptr(store = SSL_CTX_get_cert_store(ssl_ctx))
-            || !TEST_ptr(cert = sk_X509_value(chain, 0))
-            || !TEST_true(X509_STORE_CTX_init(store_ctx, store, cert, chain))
+            || !TEST_true(X509_STORE_CTX_init(store_ctx, store, NULL, chain))
             || !TEST_true(X509_STORE_CTX_set_ex_data(store_ctx, store_ctx_idx,
                                                      ssl)))
         goto end;
@@ -80,11 +78,10 @@ static int verify_chain(SSL *ssl, STACK_OF(X509) *chain)
         X509_STORE_CTX_set_verify_cb(store_ctx, SSL_get_verify_callback(ssl));
 
     /* Mask "internal failures" (-1) from our return value. */
-    if (!TEST_int_ge(ret = X509_verify_cert(store_ctx), 0))
+    if (!TEST_int_ge(ret = X509_STORE_CTX_verify(store_ctx), 0))
         ret = 0;
 
     SSL_set_verify_result(ssl, X509_STORE_CTX_get_error(store_ctx));
-    X509_STORE_CTX_cleanup(store_ctx);
 
 end:
     X509_STORE_CTX_free(store_ctx);
@@ -393,7 +390,7 @@ static int run_tlsatest(void)
     if (!TEST_ptr(f = BIO_new_file(tlsafile, "r"))
             || !TEST_ptr(ctx = SSL_CTX_new(TLS_client_method()))
             || !TEST_int_gt(SSL_CTX_dane_enable(ctx), 0)
-            || !TEST_true(SSL_CTX_load_verify_locations(ctx, CAfile, NULL))
+            || !TEST_true(SSL_CTX_load_verify_file(ctx, CAfile))
             || !TEST_int_gt(SSL_CTX_dane_mtype_set(ctx, EVP_sha512(), 2, 1),
                             0)
             || !TEST_int_gt(SSL_CTX_dane_mtype_set(ctx, EVP_sha256(), 1, 2),
@@ -409,14 +406,19 @@ end:
     return ret;
 }
 
+OPT_TEST_DECLARE_USAGE("basedomain CAfile tlsafile\n")
+
 int setup_tests(void)
 {
-    if (!TEST_ptr(basedomain = test_get_argument(0))
-            || !TEST_ptr(CAfile = test_get_argument(1))
-            || !TEST_ptr(tlsafile = test_get_argument(2))) {
-        TEST_error("Usage error: danetest basedomain CAfile tlsafile");
+    if (!test_skip_common_options()) {
+        TEST_error("Error parsing test options\n");
         return 0;
     }
+
+    if (!TEST_ptr(basedomain = test_get_argument(0))
+            || !TEST_ptr(CAfile = test_get_argument(1))
+            || !TEST_ptr(tlsafile = test_get_argument(2)))
+        return 0;
 
     ADD_TEST(run_tlsatest);
     return 1;
